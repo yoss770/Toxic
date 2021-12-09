@@ -1,0 +1,107 @@
+pipeline{
+    agent any 
+    tools {
+        maven 'maven-3.6.2'
+        jdk 'jdk8'
+    }
+    options{
+        timestamps()
+
+        timeout(unit: 'MINUTES', time: 10)
+
+        buildDiscarder(logRotator(
+            numToKeepStr: '4',
+            daysToKeepStr: '7',
+            artifactNumToKeepStr: '30')
+        )
+
+    }
+    stages{
+        
+        stage('build'){
+            steps{
+                configFileProvider([configFile(fileId: 'settings', variable: 'MAVEN_SETTINGS_XML')]) {
+                sh 'mvn -U --batch-mode -s $MAVEN_SETTINGS_XML -Dmaven.test.skip=true clean compile'
+                sh 'sudo docker build -t app .'
+            }
+        }
+        stage('UnitTest'){
+            steps{
+                script{
+                    DOCKERNAME1=env.GIT_BRANCH+"app"
+                    sh(script:"sudo docker run  --name ${DOCKERNAME1} --network=test_network -d app")
+                    sh(script:"sleep 20")
+                    sh(script:"curl http://${DOCKERNAME1}:8080")
+                }
+            }
+        }
+        stage('e2eTest'){
+            steps{
+                script{
+                    DOCKERNAME2=env.GIT_BRANCH+"e2e"
+                    sh 'sudo docker build -t  e2e -f test.dockerfile .'
+                    sh(script:"sudo docker run --name ${DOCKERNAME2} --network=test_network -e IP='${DOCKERNAME1}:8080' e2e")
+                }
+            } 
+        }
+        stage('publish'){
+            when { expression {env.GIT_BRANCH == 'master'} }
+            steps{
+                withAWS(credentials:'aws-key') {
+                    sh '''#!/bin/bash 
+                        sudo apt-get install unzip
+                        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                        unzip awscliv2.zip
+                        sudo ./aws/install
+                        aws ecr-public get-login-password --region us-east-1 | sudo docker login --username AWS --password-stdin public.ecr.aws/c7o8u9c1
+                        sudo docker tag app:latest public.ecr.aws/c7o8u9c1/toxic-albo:latest
+                        sudo docker push public.ecr.aws/c7o8u9c1/toxic-albo:latest
+                    ''' 
+                }
+            }
+        }
+             
+
+        stage('Deploy') {
+            when { expression {env.GIT_BRANCH == 'master'} }
+            steps {
+                sh '''#!/bin/bash 
+                    cd ./.ssh/
+                    chmod 400 toxicdeploy.pem
+                    ssh -i "toxicdeploy.pem" ubuntu@ec2-18-169-89-120.eu-west-2.compute.amazonaws.com "sudo docker ps -aq | xargs sudo docker rm -f"
+                    ssh -i "toxicdeploy.pem" ubuntu@ec2-18-169-89-120.eu-west-2.compute.amazonaws.com "sudo docker run --rm -d -p 80:8080 docker push public.ecr.aws/c7o8u9c1/toxic-albo:latest"
+                '''
+            }   
+        } 
+    
+    }
+    post{
+        always { 
+            script{
+                sh "sudo docker stop ${DOCKERNAME1} && sudo docker rm ${DOCKERNAME1}"
+                sh "sudo docker stop ${DOCKERNAME2} && sudo docker rm ${DOCKERNAME2}"
+            }
+
+            echo 'Post stage'
+            deleteDir()
+        }
+        success {
+            echo "success"
+            // emailext (
+            //     subject: "SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+            //     body: """<p>SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+            //         <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+            //     recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+            // )
+        }
+        failure {
+            echo "failure"
+            // emailext (
+            //     subject: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+            //     body: """<p>FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+            //         <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+            //     recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+            // )
+        }
+    }
+}

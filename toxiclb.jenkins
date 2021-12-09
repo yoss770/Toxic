@@ -1,0 +1,103 @@
+pipeline{
+    agent any 
+    tools {
+        maven 'maven-3.6.2'
+        jdk 'jdk8'
+    }
+    options{
+        timestamps()
+
+        timeout(unit: 'MINUTES', time: 10)
+
+        buildDiscarder(logRotator(
+            numToKeepStr: '4',
+            daysToKeepStr: '7',
+            artifactNumToKeepStr: '30')
+        )
+
+    }
+    stages{
+        
+        stage('build'){
+            steps{
+                configFileProvider([configFile(fileId: 'settings', variable: 'MAVEN_SETTINGS_XML')]) {
+                    sh 'mvn -U --batch-mode -s $MAVEN_SETTINGS_XML -Dmaven.test.skip=true clean compile'
+                }
+            }
+        }
+        
+        stage('unit test'){
+            steps{
+                configFileProvider([configFile(fileId: 'settings', variable: 'MAVEN_SETTINGS_XML')]) {
+                   sh 'mvn -s $MAVEN_SETTINGS_XML test'
+                }
+            }
+        }       
+      
+        stage('package'){
+            steps{
+                configFileProvider([configFile(fileId: 'settings', variable: 'MAVEN_SETTINGS_XML')]) {
+                    sh 'mvn -s $MAVEN_SETTINGS_XML package'
+                }
+            }
+        } 
+        
+        
+        stage('e2e test'){
+            steps{
+              sh """  cd ./src/test/ 
+               sudo docker-compose up -d 
+               sleep 5
+               sudo docker-compose down 
+               cd ../..
+              """ 
+                
+            }    
+        }
+       
+
+        stage('publish'){
+            
+            steps{
+                withAWS(credentials:'aws-key') {
+                    sh '''#!/bin/bash 
+                        sudo apt-get install unzip
+                        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                        unzip awscliv2.zip
+                        sudo ./aws/install
+                        aws ecr-public get-login-password --region us-east-1 | sudo docker login --username AWS --password-stdin public.ecr.aws/c7o8u9c1
+                        sudo docker tag toxiclb:latest public.ecr.aws/c7o8u9c1/toxic-albo:latest
+                        sudo docker push public.ecr.aws/c7o8u9c1/toxic-albo:latest
+                    ''' 
+                }
+            }
+        }
+    }
+    post{
+       
+        success {
+            echo "success"
+            // emailext (
+            //     subject: "SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+            //     body: """<p>SUCCESSFUL: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+            //         <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+            //     recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+            // )
+        }
+        failure {
+            echo "failure"
+            // emailext (
+            //     subject: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+            //     body: """<p>FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
+            //         <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+            //     recipientProviders: [[$class: 'DevelopersRecipientProvider']]
+            // )
+        }
+    }
+}
+
+
+
+// FROM openjdk:8-jdk-alpine 
+// COPY ./target/*.jar app.jar
+// ENTRYPOINT [ "sh", "-c", "java $JAVA_OPTS -Djava.security.egd=file:/dev/./urandom -jar app.jar" ]
